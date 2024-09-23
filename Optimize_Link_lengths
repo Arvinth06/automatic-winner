@@ -1,0 +1,114 @@
+function optimize_and_visualize_final()
+    % Define the bounds for the link lengths with L1 fixed to 215 mm
+    lb = [10, 70, 60];  % Lower bounds for L2, L3, and L4
+    ub = [130, 300, 130]; % Upper bounds for L2, L3, and L4
+
+    % Set an initial population guess to help the algorithm converge to feasible solutions
+    initial_population = [
+        95,260,120;
+        90, 220, 90;
+        100, 250, 100;  
+        120, 260, 110
+    ];
+
+    % Genetic Algorithm options for single-objective optimization (only crank angle difference)
+    options = optimoptions('ga', ...
+        'PopulationSize', 200, ...       % Increased population size
+        'MaxGenerations', 100, ...       % Increased number of generations
+        'CrossoverFraction', 0.9, ...    % Increased crossover fraction
+        'MutationFcn', @mutationadaptfeasible, ... % Adaptive mutation
+        'InitialPopulationMatrix', initial_population, ... % Provide initial guesses
+        'FunctionTolerance', 1e-6, ...   % Function tolerance for stopping
+        'Display', 'iter', ...           % Display output at each iteration
+        'PlotFcn', @gaplotbestf);       % Plot the best objective function value
+
+    % Number of variables (3 variables: L2, L3, and L4 since L1 is fixed)
+    nvars = 3;
+
+    % Run GA to optimize the objective: minimizing crank angle difference
+    [optimal_lengths, min_angle_difference] = ga(@(link_lengths) objective_crank_angle(215, link_lengths), ...
+                                                 nvars, [], [], [], [], lb, ub, [], options);
+
+    % Output the results
+    fprintf('Optimal link lengths:\nL1 = 215 mm (fixed)\nL2 = %.2f mm\nL3 = %.2f mm\nL4 = %.2f mm\n', ...
+        optimal_lengths(1), optimal_lengths(2), optimal_lengths(3));
+    fprintf('Minimum crank angle difference: %.2f degrees\n', min_angle_difference);
+
+    % Parameters for visualization
+    theta_offset = 77; % Offset angle in degrees
+    hypotenuse_AB = 215; % Distance between fixed points A and B' in mm
+
+    % Visualize the mechanism at two positions: ON (90 degrees) and EARTH (0 degrees)
+    visualize_mechanism(215, optimal_lengths(1), optimal_lengths(2), optimal_lengths(3), theta_offset, hypotenuse_AB);
+end
+
+function objective = objective_crank_angle(L1, link_lengths)
+    % Extract the link lengths
+    L2 = link_lengths(1);
+    L3 = link_lengths(2);
+    L4 = link_lengths(3);
+
+    % Fixed pivot offset angle (77 degrees)
+    theta_offset = 77;
+
+    % Ensure that Grashof condition is met (L1 + L4 <= L2 + L3)
+    if (L1 + L4) > (L2 + L3)
+        objective = 1000; % High penalty for violating Grashof condition
+        return;
+    end
+
+    % Evaluate crank angles at ON (90°) and EARTH (0°) positions
+    theta_c_on = calculate_crank_angle(L1, L2, L3, L4, 90, theta_offset);
+    theta_c_earth = calculate_crank_angle(L1, L2, L3, L4, 0, theta_offset);
+
+    % Check if angles are valid
+    if isnan(theta_c_on) || isnan(theta_c_earth)
+        objective = 1000; % High penalty for invalid configurations
+    else
+        % Calculate crank angle difference
+        crank_angle_diff = abs(theta_c_on - theta_c_earth) * (180 / pi); % Convert to degrees
+
+        % Apply a high penalty for small angle differences (e.g., less than 5 degrees)
+        if crank_angle_diff < 5 
+            objective = 1000; % Penalize near-zero differences
+        else
+            % Objective: Minimize crank angle difference
+            objective = crank_angle_diff;
+        end
+    end
+end
+
+function theta_c = calculate_crank_angle(L1, L2, L3, L4, theta_f_deg, theta_offset_deg)
+    % Convert angles to radians
+    theta_f = deg2rad(theta_f_deg);
+    theta_offset = deg2rad(theta_offset_deg);
+
+    % Fixed point D coordinates
+    Dx = L1 * cos(theta_offset);
+    Dy = L1 * sin(theta_offset);
+
+    % Position of point C (end of the follower)
+    Cx = Dx + L4 * cos(theta_f);
+    Cy = Dy + L4 * sin(theta_f);
+
+    % Distance from A to C
+    ACx = Cx;
+    ACy = Cy;
+    AC = sqrt(ACx^2 + ACy^2);
+
+    % Law of Cosines to find angle at joint A (theta_c)
+    cos_theta_c = (L2^2 + AC^2 - L3^2) / (2 * L2 * AC);
+
+    % Check if cos_theta_c is within valid range
+    if cos_theta_c < -1 || cos_theta_c > 1
+        theta_c = NaN; % Invalid configuration
+        return;
+    end
+
+    % Calculate theta_c
+    theta_c = acos(cos_theta_c);
+
+    % Adjust theta_c based on the position of point C
+    phi = atan2(ACy, ACx);
+    theta_c = phi - theta_c;
+end
