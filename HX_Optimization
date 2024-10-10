@@ -1,0 +1,172 @@
+function HX_Optimization_MultiObj
+    % Geometric data for the heat exchanger from reference (provide real values here)
+    fin_height = 0.005;  % Example: Fin height in meters
+    fin_spacing = 0.002; % Example: Fin spacing in meters
+    fin_thickness = 0.001; % Example: Fin thickness in meters
+    rows = 10;           % Example: Number of rows
+    length_hx = 0.5;     % Example: Length of the heat exchanger in meters
+
+    % Define system parameters based on structured input from reference
+    params.rho_air = 1.225;  % Air density (kg/m³)
+    params.rho_oil = 870;    % Oil density (kg/m³)
+    params.mu_air = 1.81e-5;  % Dynamic viscosity of air (Pa·s)
+    params.mu_oil = 0.04;    % Dynamic viscosity of oil (Pa·s)
+    params.k_air = 0.026;    % Thermal conductivity of air (W/m·K)
+    params.k_oil = 0.15;     % Thermal conductivity of oil (W/m·K)
+    params.Pr_air = 0.71;    % Prandtl number of air
+    params.Pr_oil = 150;     % Prandtl number of oil
+    params.dT_lm = 50;       % Log mean temperature difference (K)
+    params.required_heat_transfer = 4000;  % Start with a relaxed heat transfer requirement (W)
+
+    % Define specific heat capacities (J/kg·K)
+    params.c_air = 1005;  % Specific heat capacity of air (J/kg·K)
+    params.c_oil = 2000;  % Specific heat capacity of oil (J/kg·K)
+
+    % **Increased flow rates for more realistic pressure drop**
+    params.Vdot_air = 2.0;  % Volumetric flow rate for air (m³/s)
+    params.Vdot_oil = 1.0;  % Volumetric flow rate for oil (m³/s)
+
+    % Add fouling resistance
+    params.R_f = 0.0002;  % Fouling resistance (m²·K/W)
+
+    % Define material density for heat exchanger (e.g., aluminum)
+    params.rho_hx = 2700;  % Density of aluminum (kg/m³)
+
+    % Define efficiency of the fan or pump
+    params.eta = 0.85;  % Efficiency (85%)
+
+    % Bounds for fin geometry variables based on reference
+    lb = [0.5, 0.05, 0.01]; % Fin Height, Fin Spacing, Fin Thickness (lower bounds)
+    ub = [2.5, 0.75, 0.05]; % Further increased upper bounds
+
+    % Call multi-objective genetic algorithm
+    options = optimoptions('gamultiobj', 'PopulationSize', 400, 'MaxGenerations', 200, 'Display', 'iter', ...
+        'UseParallel', true, 'ConstraintTolerance', 1e-3, 'PlotFcn', {@gaplotpareto, @gaplotscorediversity});
+    
+    [x_opt, fval] = gamultiobj(@(x)objective_function(x, params, fin_height, fin_spacing, fin_thickness, rows, length_hx), ...
+                               3, [], [], [], [], lb, ub, @(x)constraints(x, params), options);
+    
+    % Display the optimal solutions
+    disp('Optimal Solutions (Fin Height, Fin Spacing, Fin Thickness):');
+    disp(x_opt);
+    disp('Objective Function Values (Heat Transfer, Weight, Power):');
+    disp(fval);
+end
+
+function f = objective_function(x, params, fin_height, fin_spacing, fin_thickness, rows, length_hx)
+    % Design variables: Fin Height, Fin Spacing, Fin Thickness
+    h_f = x(1);  % Fin height
+    s_f = x(2);  % Fin spacing
+    t_f = x(3);  % Fin thickness
+
+    % Hydraulic diameter for offset fin geometry
+    D_h = 4 * h_f * s_f / (h_f + s_f);
+
+    % Calculate Reynolds number for both fluids (air and oil)
+    Re_air = (params.rho_air * params.Vdot_air * D_h) / params.mu_air;
+    Re_oil = (params.rho_oil * params.Vdot_oil * D_h) / params.mu_oil;
+
+    % Calculate Nusselt number using empirical correlation (Kays and London)
+    Nu_air = calculateNu(Re_air, params.Pr_air);  % Air side
+    Nu_oil = calculateNu(Re_oil, params.Pr_oil);  % Oil side
+
+    % Calculate heat transfer coefficients
+    h_air = (Nu_air * params.k_air) / D_h;
+    h_oil = (Nu_oil * params.k_oil) / D_h;
+
+    % Calculate overall heat transfer coefficient U
+    U = 1 / (1/h_air + 1/h_oil + params.R_f);  % Include fouling resistance
+
+    % Heat transfer area A from fin geometry and length
+    A = h_f * s_f * length_hx * rows;
+
+    % NTU calculation
+    C_min = min(params.rho_air * params.Vdot_air * params.c_air, params.rho_oil * params.Vdot_oil * params.c_oil);
+    NTU = U * A / C_min;
+
+    % Calculate effectiveness using NTU
+    epsilon = 1 - exp(-NTU);
+
+    % Heat transfer rate
+    Q = epsilon * C_min * params.dT_lm;
+
+    % **Pressure Drop Fix**:
+    deltaP = calculatePressureDrop(h_f, s_f, t_f, D_h, Re_air, params);
+    if deltaP <= 0
+        deltaP = 0.1;  % Artificially ensure pressure drop is non-zero for power calculation
+    end
+
+    % Volume and weight
+    V = h_f * s_f * t_f * length_hx * rows;  % Volume of HX
+    W = params.rho_hx * V;  % Weight of the HX (kg)
+
+    % Power consumption
+    Power = (deltaP * params.Vdot_air) / params.eta;  % Power consumption (W)
+    
+    if Power == 0  % Artificial minimum to ensure non-zero power consumption
+        Power = 1.0;  % Arbitrary small value for testing
+    end
+
+    % Objective function
+    f(1) = -Q;  % Maximize heat transfer
+    f(2) = W;   % Minimize weight
+    f(3) = Power;  % Minimize power consumption
+end
+
+function Nu = calculateNu(Re, Pr)
+    % Empirical correlation for Nusselt number (Kays and London)
+    % Example values for offset-fin heat exchangers:
+    C = 0.23;  % Constant (based on the geometry of the heat exchanger)
+    m = 0.8;   % Exponent for Reynolds number
+    n = 0.33;  % Exponent for Prandtl number
+
+    % Nusselt number correlation
+    Nu = C * Re^m * Pr^n;
+end
+
+function deltaP = calculatePressureDrop(h_f, s_f, t_f, D_h, Re, params)
+    % Length of heat exchanger (m)
+    L = 0.5;  % Example value (you can adjust based on your design)
+    
+    % Flow velocity (v = volumetric flow rate / cross-sectional area)
+    v = params.Vdot_air / (h_f * s_f);  % Simplified for air side; adjust if needed
+    
+    % Calculate friction factor (assumes turbulent flow, Re > 4000)
+    if Re > 4000
+        f = 0.079 * Re^(-0.25);  % Turbulent flow correlation
+    else
+        f = 64 / Re;  % Laminar flow approximation
+    end
+    
+    % Calculate pressure drop using Darcy-Weisbach equation
+    deltaP = f * (L / D_h) * (params.rho_air * v^2 / 2);  % Pressure drop (Pa)
+end
+
+function [c, ceq] = constraints(x, params)
+    h_f = x(1);  % Fin height
+    s_f = x(2);  % Fin spacing
+    t_f = x(3);  % Fin thickness
+
+    % Calculate the current heat transfer rate
+    D_h = 4 * h_f * s_f / (h_f + s_f);  % Hydraulic diameter
+    U = calculateU(D_h, params);  % Calculate U from hydraulic diameter and params
+    A = h_f * s_f * 0.5 * 10;  % Example calculation for area
+    C_min = 100;  % Minimum heat capacity rate (arbitrary example)
+    NTU = U * A / C_min;
+    epsilon = 1 - exp(-NTU);
+    Q = epsilon * C_min * params.dT_lm;
+
+    % Penalty for violating the required heat transfer constraint
+    penalty = max(0, params.required_heat_transfer - Q);
+
+    % Inequality constraint: Add penalty for constraint violations
+    c = penalty;  % Penalize constraint violations instead of rejecting them
+    
+    % No equality constraints
+    ceq = [];
+end
+
+function U = calculateU(D_h, params)
+    % Placeholder function to calculate U (overall heat transfer coefficient)
+    U = 100;  % Replace this with actual calculation
+end
