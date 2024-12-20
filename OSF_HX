@@ -1,154 +1,210 @@
-% Comprehensive Heat Exchanger Optimization for Electrified Aircraft
+%% Comprehensive Heat Exchanger Optimization for Electrified Aircraft
 clear; clc;
 
 %% Input Parameters for Electrified Aircraft Application
-% System Specifications (Based on NASA Data)
-P_motor = 200e3;       % Motor power (W)
-P_electronics = 50e3;  % Power electronics power (W)
-P_battery = 50e3;      % Battery power (W)
-
-% Efficiency Assumptions
-eta_motor = 0.95;         % Motor efficiency
-eta_electronics = 0.98;   % Electronics efficiency
-eta_battery = 0.92;       % Battery efficiency
-
-% Heat Load Calculations
-Q_motor = P_motor * (1 - eta_motor);            % Heat load from motor (W)
-Q_electronics = P_electronics * (1 - eta_electronics); % Heat load from electronics (W)
-Q_battery = P_battery * (1 - eta_battery);      % Heat load from battery (W)
-Q_total = Q_motor + Q_electronics + Q_battery;  % Total heat load (W)
-
-% Adjust to 19 kW for total heat load
-Q_total = 19000; % Overriding to 19kW based on user input
+% Heat Load Assumption
+Q_total = 19e3; % Total heat load (W)
 disp(['Total Heat Load (Q): ', num2str(Q_total), ' W']);
 
-% Revised Bounds for Design Variables
-lb = [0.02, 0.005, 0.01, 0.1, 0.1, 0.01, 2, 0.5, 0.05, 0.01, 0.01, 5]; % Lower bounds
-ub = [0.3, 0.05, 0.5, 0.5, 0.5, 0.5, 50, 5, 0.3, 0.05, 0.05, 50];    % Upper bounds
+%% Bounds for Design Variables
+% Hot and Cold Side Variables: [Fin Length, Fin Width, Fin Height, Fin Spacing, Flow Length, N Channels, N Layers, Air Velocity, Coolant Velocity]
+lb = [0.1, 0.01, 0.01, 0.002, 0.2, 10, 1, 1.0, 0.5, ... % Hot side
+      0.1, 0.01, 0.01, 0.002, 0.2, 10, 1, 1.0, 0.5];    % Cold side
+ub = [0.3, 0.05, 0.05, 0.01, 0.5, 100, 10, 3.0, 1.5, ... % Hot side
+      0.3, 0.05, 0.05, 0.01, 0.5, 100, 10, 3.0, 1.5];    % Cold side
 
 % Objective Function
-objFun = @(x) objectiveFunctions(x, Q_total);
+objFun = @(x) heatExchangerObjective(x, Q_total);
 
-% Constraint Function
+% Constraint Function to Ensure Realistic Values
 constraintFun = @(x) heatExchangerConstraints(x);
 
 % Genetic Algorithm Options for GAMULTIOBJ
 options = optimoptions('gamultiobj', ...
-    'PopulationSize', 200, ... % Increase population size
-    'MaxGenerations', 300, ... % Allow more generations
+    'PopulationSize', 150, ...
+    'MaxGenerations', 100, ...
     'CrossoverFraction', 0.8, ...
     'FunctionTolerance', 1e-6, ...
-    'UseParallel', true);
+    'UseParallel', true, ...
+    'PlotFcn', {@gaplotpareto});
 
 % Multi-objective Genetic Algorithm
 [optimalVariables, optimalObjectives] = gamultiobj(objFun, length(lb), [], [], [], [], lb, ub, constraintFun, options);
 
 % Display Results
-disp('Optimal Variables (Coolant Side: Width, Height, Length, Fin Spacing | Air Side: Width, Height, Length, Fin Spacing | Number of Layers, Air Flow Rate, Cooling Flow Rate):');
+disp('Optimal Variables (Hot-side and Cold-side Design Variables):');
 disp(optimalVariables);
-disp('Optimal Objectives (Minimized Weight, Maximized Heat Transfer, Minimized Pressure Drop):');
-disp(optimalObjectives);
 
-%% Plot Pareto Front
-% Extract objectives
-weight = optimalObjectives(:, 1);            % Minimized weight
-heatTransfer = -optimalObjectives(:, 2);     % Maximized heat transfer (negative sign reversed)
-pressureDrop = optimalObjectives(:, 3);      % Minimized pressure drop
+disp('Optimal Objectives:');
+disp(['Weight (kg): ', num2str(optimalObjectives(:,1)' * 10)]); % Convert normalized weight
 
-% 3D Pareto Front
-figure;
-scatter3(weight, heatTransfer, pressureDrop, 50, 'filled');
-xlabel('Weight (kg)');
-ylabel('Heat Transfer (W)');
-zlabel('Pressure Drop (Pa)');
-title('3D Pareto Front');
-grid on;
-
-% 2D Pareto Front Projections
-figure;
-subplot(1, 3, 1);
-scatter(weight, heatTransfer, 50, 'filled');
-xlabel('Weight (kg)');
-ylabel('Heat Transfer (W)');
-title('Weight vs. Heat Transfer');
-grid on;
-
-subplot(1, 3, 2);
-scatter(weight, pressureDrop, 50, 'filled');
-xlabel('Weight (kg)');
-ylabel('Pressure Drop (Pa)');
-title('Weight vs. Pressure Drop');
-grid on;
-
-subplot(1, 3, 3);
-scatter(heatTransfer, pressureDrop, 50, 'filled');
-xlabel('Heat Transfer (W)');
-ylabel('Pressure Drop (Pa)');
-title('Heat Transfer vs. Pressure Drop');
-grid on;
+disp(['Heat Transfer Rate (W): ', num2str(-optimalObjectives(:,2)')]);
+disp(['Pressure Drop (Pa): ', num2str(optimalObjectives(:,3)' * 100)]); % Convert normalized pressure drop
 
 %% Objective Function Implementation
-function F = objectiveFunctions(x, Q_total)
-    % Coolant Side
-    W_cool = x(1); H_cool = x(2); L_cool = x(3); fin_spacing_cool = x(4);
-    % Air Side
-    W_air = x(5); H_air = x(6); L_air = x(7); fin_spacing_air = x(8);
-    % Common Parameters
-    N_layers = x(9); air_flow = x(10); cooling_flow = x(11); t_fin = 0.0005;
+function F = heatExchangerObjective(x, Q_total)
+    % Extract design variables for Hot and Cold Sides
+    hot_vars = x(1:9); % Hot side: [fin length, width, height, spacing, flow length, N_channels, N_layers, air velocity, coolant velocity]
+    cold_vars = x(10:18); % Cold side: [fin length, width, height, spacing, flow length, N_channels, N_layers, air velocity, coolant velocity]
+
+    % Assign hot side variables
+    fin_length_hot = hot_vars(1);      % [m]
+    fin_width_hot = hot_vars(2);       % [m]
+    fin_height_hot = hot_vars(3);      % [m]
+    fin_spacing_hot = hot_vars(4);     % [m]
+    L1 = hot_vars(5);                  % [m]
+    N_channels_hot = hot_vars(6);      % [-]
+    N_layers_hot = hot_vars(7);        % [-]
+    v_air_hot = hot_vars(8);           % [m/s]
+    v_coolant_hot = hot_vars(9);       % [m/s]
+
+    % Assign cold side variables
+    fin_length_cold = cold_vars(1);    % [m]
+    fin_width_cold = cold_vars(2);     % [m]
+    fin_height_cold = cold_vars(3);    % [m]
+    fin_spacing_cold = cold_vars(4);   % [m]
+    L2 = cold_vars(5);                 % [m]
+    N_channels_cold = cold_vars(6);    % [-]
+    N_layers_cold = cold_vars(7);      % [-]
+    v_air_cold = cold_vars(8);         % [m/s]
+    v_coolant_cold = cold_vars(9);     % [m/s]
+
+    % Fluid Properties for Hot Side (Coolant)
+    rho_hot = 1050;         % Density [kg/m³]
+    mu_hot = 0.001;         % Viscosity [Pa·s]
+    cp_hot = 4186;          % Specific heat capacity [J/kg·K]
+    k_hot = 0.6;            % Thermal conductivity [W/m·K]
+
+    % Fluid Properties for Cold Side (Air)
+    rho_cold = 1.2;         % Density [kg/m³]
+    mu_cold = 18.1e-6;      % Viscosity [Pa·s]
+    cp_cold = 1005;         % Specific heat capacity [J/kg·K]
+    k_cold = 0.0262;        % Thermal conductivity [W/m·K]
 
     % Constants
-    material_density = 2700;
-    rho_cool = 1050; mu_cool = 0.001; cp_cool = 4186; k_cool = 0.6;
-    rho_air = 1.2; mu_air = 18.1e-6; cp_air = 1005; k_air = 0.0262;
+    material_density = 2700; % Density of aluminum [kg/m³]
+    t_fin = 0.005;           % Fin thickness [m]
+    C_min = min(rho_hot * cp_hot * v_coolant_hot, rho_cold * cp_cold * v_air_cold);
+    C_max = max(rho_hot * cp_hot * v_coolant_hot, rho_cold * cp_cold * v_air_cold);
+    C_r = C_min / C_max;    % Heat capacity ratio
 
-    % Prandtl Numbers
-    Pr_cool = (mu_cool * cp_cool) / k_cool; Pr_air = (mu_air * cp_air) / k_air;
+    % Manglik-Bergles Correlations
+    % Hydraulic Diameter
+    D_h_hot = 4 * fin_spacing_hot * fin_height_hot / (2 * (fin_spacing_hot + fin_height_hot));
+    D_h_cold = 4 * fin_spacing_cold * fin_height_cold / (2 * (fin_spacing_cold + fin_height_cold));
 
-    % Hydraulic Diameter Calculations
-    Dh_cool = 4 * fin_spacing_cool * H_cool / (2 * (fin_spacing_cool + H_cool));
-    Dh_air = 4 * fin_spacing_air * H_air / (2 * (fin_spacing_air + H_air));
+    % Reynolds Number
+    Re_hot = rho_hot * v_coolant_hot * D_h_hot / mu_hot;
+    Re_cold = rho_cold * v_air_cold * D_h_cold / mu_cold;
 
-    % Reynolds Numbers
-    Re_cool = rho_cool * cooling_flow * Dh_cool / mu_cool;
-    Re_air = rho_air * air_flow * Dh_air / mu_air;
+    % Colburn j-factor
+    j_hot = 0.6522 * Re_hot^(-0.5403) * (fin_spacing_hot / L1)^0.1541 * (fin_height_hot / L1)^(-0.1499) * (t_fin / L1)^0.0678;
+    j_cold = 0.6522 * Re_cold^(-0.5403) * (fin_spacing_cold / L2)^0.1541 * (fin_height_cold / L2)^(-0.1499) * (t_fin / L2)^0.0678;
 
     % Heat Transfer Coefficients
-    h_cool = 0.023 * k_cool / Dh_cool * Re_cool^0.8 * Pr_cool^(1/3);
-    h_air = 0.023 * k_air / Dh_air * Re_air^0.8 * Pr_air^(1/3);
+    h_hot = j_hot * Re_hot * k_hot / D_h_hot;
+    h_cold = j_cold * Re_cold * k_cold / D_h_cold;
 
-    % Number of Channels and Heat Transfer Area
-    N_channels_cool = max(1, floor(W_cool / fin_spacing_cool));
-    N_channels_air = max(1, floor(W_air / fin_spacing_air));
-    A_cool = H_cool * L_cool * N_layers * N_channels_cool;
-    A_air = H_air * L_air * N_layers * N_channels_air;
+    % Overall Heat Transfer Coefficient
+    UA = 1 / (1 / (h_hot * fin_length_hot * L1 * N_layers_hot * N_channels_hot) + 1 / (h_cold * fin_length_cold * L2 * N_layers_cold * N_channels_cold));
 
-    % UA Calculation
-    UA = 1 / (1 / (h_cool * A_cool) + 1 / (h_air * A_air));
+    % NTU and Effectiveness for Counterflow Configuration
+    NTU = UA / C_min;
+    effectiveness = (1 - exp(-NTU * (1 - C_r))) / (1 - C_r * exp(-NTU * (1 - C_r)));
 
-    % Heat Transfer
-    Q = UA * Q_total;
+    % Heat Transfer Rate
+    Q = effectiveness * C_min * (50 - 20); % Assuming inlet temperature difference of 50K to 20K
 
-    % Pressure Drop
-    deltaP_cool = (0.5 * rho_cool * cooling_flow^2 / Dh_cool);
-    deltaP_air = (0.5 * rho_air * air_flow^2 / Dh_air);
-    deltaP_total = deltaP_cool + deltaP_air;
+    % Total Pressure Drop
+    f_hot = 9.624 * Re_hot^(-0.7422) * (fin_spacing_hot / L1)^(-0.1856) * (fin_height_hot / L1)^(-0.3053) * (t_fin / L1)^0.2659;
+    f_cold = 9.624 * Re_cold^(-0.7422) * (fin_spacing_cold / L2)^(-0.1856) * (fin_height_cold / L2)^(-0.3053) * (t_fin / L2)^0.2659;
+    pressure_drop_hot = f_hot * (L1 / D_h_hot) * (0.5 * rho_hot * v_coolant_hot^2);
+    pressure_drop_cold = f_cold * (L2 / D_h_cold) * (0.5 * rho_cold * v_air_cold^2);
+    pressure_drop_total = pressure_drop_hot + pressure_drop_cold;
 
-    % Material Weight
-    fin_volume = A_cool * t_fin + A_air * t_fin;
-    fin_weight = fin_volume * material_density;
+    % Weight Calculations
+    fin_volume_hot = fin_length_hot * fin_width_hot * t_fin * N_channels_hot * N_layers_hot;
+    fin_weight_hot = fin_volume_hot * material_density;
 
-    % Objectives
-    F(1) = fin_weight;     % Minimize Weight
-    F(2) = -Q;             % Maximize Heat Transfer
-    F(3) = deltaP_total;   % Minimize Pressure Drop
+    fin_volume_cold = fin_length_cold * fin_width_cold * t_fin * N_channels_cold * N_layers_cold;
+    fin_weight_cold = fin_volume_cold * material_density;
+
+    total_weight = fin_weight_hot + fin_weight_cold; % Total weight
+
+    % Objective Function Values
+    F(1) = total_weight / 10;       % Normalize weight
+    F(2) = -Q;                      % Maximize heat transfer rate (negative for minimization)
+    F(3) = pressure_drop_total / 100; % Normalize pressure drop
 end
 
 %% Constraint Function
 function [c, ceq] = heatExchangerConstraints(x)
+    [total_weight, pressure_drop_total, Q] = evaluateConstraints(x);
     ceq = []; % No equality constraints
-    c = [
-        x(9) - 50;   % Number of layers < 50
-        x(10) - 5;   % Air flow rate < 5 kg/s
-        x(11) - 2;   % Cooling flow rate < 2 kg/s
-    ];
+    c = [total_weight - 20; % Ensure weight < 20 kg
+         pressure_drop_total - 250; % Ensure pressure drop < 250 Pa
+         Q - 19e3]; % Ensure heat transfer <= total heat load
 end
+
+function [total_weight, pressure_drop_total, Q] = evaluateConstraints(x)
+    % Extract design variables for Hot and Cold Sides
+    hot_vars = x(1:9); % Hot side variables
+    cold_vars = x(10:18); % Cold side variables
+
+    % Assign hot side variables
+    fin_length_hot = hot_vars(1); fin_height_hot = hot_vars(3); fin_spacing_hot = hot_vars(4);
+    L1 = hot_vars(5); N_channels_hot = hot_vars(6); N_layers_hot = hot_vars(7); 
+    v_coolant_hot = hot_vars(9);
+
+    % Assign cold side variables
+    fin_length_cold = cold_vars(1); fin_height_cold = cold_vars(3); fin_spacing_cold = cold_vars(4);
+    L2 = cold_vars(5); N_channels_cold = cold_vars(6); N_layers_cold = cold_vars(7); 
+    v_air_cold = cold_vars(8);
+
+    % Fluid Properties
+    rho_hot = 1050; mu_hot = 0.001; cp_hot = 4186; k_hot = 0.6;
+    rho_cold = 1.2; mu_cold = 18.1e-6; cp_cold = 1005; k_cold = 0.0262;
+
+    % Material and Fin Properties
+    material_density = 2700; t_fin = 0.005;
+
+    % Hydraulic Diameters
+    D_h_hot = 4 * fin_spacing_hot * fin_height_hot / (2 * (fin_spacing_hot + fin_height_hot));
+    D_h_cold = 4 * fin_spacing_cold * fin_height_cold / (2 * (fin_spacing_cold + fin_height_cold));
+
+    % Reynolds Numbers
+    Re_hot = rho_hot * v_coolant_hot * D_h_hot / mu_hot;
+    Re_cold = rho_cold * v_air_cold * D_h_cold / mu_cold;
+
+    % Colburn j-factors
+    j_hot = 0.6522 * Re_hot^(-0.5403) * (fin_spacing_hot / L1)^0.1541 * (fin_height_hot / L1)^(-0.1499) * (t_fin / L1)^0.0678;
+    j_cold = 0.6522 * Re_cold^(-0.5403) * (fin_spacing_cold / L2)^0.1541 * (fin_height_cold / L2)^(-0.1499) * (t_fin / L2)^0.0678;
+
+    % Heat Transfer Coefficients
+    h_hot = j_hot * Re_hot * k_hot / D_h_hot;
+    h_cold = j_cold * Re_cold * k_cold / D_h_cold;
+
+    % Overall Heat Transfer Coefficient
+    UA = 1 / (1 / (h_hot * fin_length_hot * L1 * N_layers_hot * N_channels_hot) + 1 / (h_cold * fin_length_cold * L2 * N_layers_cold * N_channels_cold));
+
+    % Heat Transfer Rate
+    C_min = min(rho_hot * cp_hot * v_coolant_hot, rho_cold * cp_cold * v_air_cold);
+    C_r = C_min / max(rho_hot * cp_hot * v_coolant_hot, rho_cold * cp_cold * v_air_cold);
+    NTU = UA / C_min;
+    effectiveness = (1 - exp(-NTU * (1 - C_r))) / (1 - C_r * exp(-NTU * (1 - C_r)));
+    Q = effectiveness * C_min * (50 - 20); % Assuming inlet temperature difference of 50K to 20K
+
+    % Pressure Drops
+    f_hot = 9.624 * Re_hot^(-0.7422) * (fin_spacing_hot / L1)^(-0.1856) * (fin_height_hot / L1)^(-0.3053) * (t_fin / L1)^0.2659;
+    f_cold = 9.624 * Re_cold^(-0.7422) * (fin_spacing_cold / L2)^(-0.1856) * (fin_height_cold / L2)^(-0.3053) * (t_fin / L2)^0.2659;
+    pressure_drop_hot = f_hot * (L1 / D_h_hot) * (0.5 * rho_hot * v_coolant_hot^2);
+    pressure_drop_cold = f_cold * (L2 / D_h_cold) * (0.5 * rho_cold * v_air_cold^2);
+    pressure_drop_total = pressure_drop_hot + pressure_drop_cold;
+
+    % Weight Calculations
+    fin_volume_hot = fin_length_hot * hot_vars(2) * t_fin * N_channels_hot * N_layers_hot;
+    fin_volume_cold = fin_length_cold * cold_vars(2) * t_fin * N_channels_cold * N_layers_cold;
+    total_weight = (fin_volume_hot + fin_volume_cold) * material_density; % Total weight
+end
+
+
